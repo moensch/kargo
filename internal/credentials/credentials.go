@@ -4,12 +4,13 @@ import (
 	"context"
 	"strings"
 
+	"github.com/akuity/kargo/internal/git"
+	"github.com/akuity/kargo/internal/logging"
 	"github.com/kelseyhightower/envconfig"
+	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	"github.com/akuity/kargo/internal/git"
 )
 
 const (
@@ -128,7 +129,10 @@ func (k *kubernetesDatabase) Get(
 	repoURL string,
 ) (Credentials, bool, error) {
 	creds := Credentials{}
-
+	logger := logging.LoggerFromContext(ctx).WithFields(log.Fields{
+		"namespace": namespace,
+		"repo":      repoURL,
+	})
 	var secret *corev1.Secret
 	var err error
 
@@ -146,9 +150,13 @@ func (k *kubernetesDatabase) Get(
 	); err != nil {
 		return creds, false, err
 	}
+
 	// Found creds in namespace
 	if secret != nil {
+		logger.WithField("secret", secret.Name).Debug("found credential in namespace")
 		return secretToCreds(secret), true, nil
+	} else {
+		logger.Debug("failed to find credential in namespace")
 	}
 
 	// Check namespace for credentials template
@@ -168,7 +176,10 @@ func (k *kubernetesDatabase) Get(
 
 	// Found template creds in namespace
 	if secret != nil {
+		logger.WithField("secret", secret.Name).Debug("found credential template in namespace")
 		return secretToCreds(secret), true, nil
+	} else {
+		logger.Debug("failed to find credential template in namespace")
 	}
 
 	// Check global credentials namespaces for credentials
@@ -189,7 +200,10 @@ func (k *kubernetesDatabase) Get(
 		}
 		// Found creds in global creds namespace
 		if secret != nil {
+			logger.WithField("secret", secret.Name).WithField("globalNamespace", globalCredsNamespace).Debug("found credential in global namespace")
 			return secretToCreds(secret), true, nil
+		} else {
+			logger.WithField("globalNamespace", globalCredsNamespace).Debug("failed to find credential in global namespace")
 		}
 
 		// Check shared creds namespace for credentials template
@@ -208,12 +222,16 @@ func (k *kubernetesDatabase) Get(
 		}
 
 		if secret != nil {
+			logger.WithField("secret", secret.Name).WithField("globalNamespace", globalCredsNamespace).Debug("found credential template in global namespace")
 			return secretToCreds(secret), true, nil
+		} else {
+			logger.WithField("globalNamespace", globalCredsNamespace).Debug("failed to find credential template in global namespace")
 		}
 	}
 
 	if k.argoClient == nil {
 		// We cannot borrow creds from from Argo CD
+		logger.Debug("not allowed to borro credentials from Argo CD")
 		return creds, false, nil
 	}
 
@@ -250,23 +268,28 @@ func (k *kubernetesDatabase) Get(
 	}
 
 	if secret == nil {
+		logger.Debug("no secret found in argocd namespace")
 		return creds, false, nil
 	}
-
+	logger.WithField("secret", secret.Name).Debug("evaluating a secret in argocd namespace")
 	// This Secret represents credentials borrowed from Argo CD. We need to look
 	// at its annotations to see if this is authorized by the Secret's owner.
 	// If it's not annotated properly, we'll treat it as we didn't find it.
 	allowedProjectsStr, ok := secret.Annotations[authorizedProjectsAnnotationKey]
 	if !ok {
+		logger.Debug("found credential in Argo CD namespace, but missing authorized projects annotation")
 		return creds, false, nil
 	}
 	allowedProjects := strings.Split(allowedProjectsStr, ",")
 	for _, allowedProject := range allowedProjects {
 		if strings.TrimSpace(allowedProject) == namespace {
+			logger.WithField("allowedProject", strings.TrimSpace(allowedProject)).Debug("found credential in Argo CD namespace, and is authorized for project")
 			return secretToCreds(secret), true, nil
+		} else {
+			logger.WithField("allowedProject", strings.TrimSpace(allowedProject)).Debug("found credential in Argo CD namespace, but not authorized for project")
 		}
 	}
-
+	logger.Debug("exiting with no credential found")
 	return creds, false, nil
 }
 
